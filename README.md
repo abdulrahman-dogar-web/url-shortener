@@ -1,13 +1,13 @@
 # ShortHub — URL Shortener & Analytics
 
-A fast, premium, fully client-side URL shortener with click analytics and QR codes.
-Open `index.html` in any modern browser — no build step, no server, no account, no install.
+A fast, premium, server-backed URL shortener with click analytics and QR codes.
+Open `index.html` in any modern browser — no build step, no server to run yourself, no account, no install.
 
-> **Honest label:** this is a **local demo**. Short links (shown as `hub.ly/xxxxxx`)
-> only work inside this app, in this browser. Clicking one opens the original URL
-> and counts the click here. Nothing is uploaded anywhere. See
-> [Deploying a real backend](#deploying-a-real-backend) below for how to make
-> short links work for everyone, everywhere.
+> Short links look like `https://abdulrahman-dogar-web.github.io/url-shortener/?r=xxxxxx`
+> and **work on any device**: opening one looks the code up on the server,
+> counts the click there, and redirects to the original URL. “My links” below
+> is a cache of the links you created in this browser — clicks from anywhere
+> are counted on the server and synced into it.
 
 ## Features
 
@@ -16,8 +16,7 @@ Open `index.html` in any modern browser — no build step, no server, no account
   from an unambiguous alphabet (no `0`/`O`/`1`/`l`/`I`), generated with
   `crypto.getRandomValues` when available.
 - **Copy button** — copies the short link with a clipboard-API fallback for older browsers.
-- **Click counting** — every visit (table link, "Visit" button, or the result-box
-  link) increments the counter and records a timestamp in the link's click log.
+- **Click counting** — every visit to a short link increments the counter on the server and records a timestamp in the link's click log, wherever the click came from.
 - **Dashboard table** — all links with clicks, created date (relative, e.g. "2 days ago",
   full date on hover), and last-clicked time. Sort by newest / oldest / most /
   least clicked, filter by clicked / never clicked / created today, and search by
@@ -36,8 +35,7 @@ Open `index.html` in any modern browser — no build step, no server, no account
 - **Demo data** — a "Load demo data" button adds 3 clearly labelled demo links
   with 11 clicks so you can explore the analytics. Your own links are never
   faked: the app starts empty.
-- **Persistence** — links survive reloads via `localStorage` key `shorthub.links.v1`.
-  Clearing browser data deletes them.
+- **Persistence** — links live on the server. The table in this app is a local cache (`localStorage` key `shorthub.links.v1`) of the links you created in this browser; clearing browser data clears the cache, not the links.
 
 ## Files
 
@@ -45,19 +43,22 @@ Open `index.html` in any modern browser — no build step, no server, no account
 | --- | --- |
 | `index.html` | The whole app shell: create form, stats, charts, links table, QR dialog. |
 | `styles.css` | All styling — dark theme, responsive, no frameworks or external fonts. |
-| `app.js` | All logic: shortening, storage, clicks, analytics, charts, QR dialog, export. |
+| `config.js` | Server config: KVdb bucket + prefix, `apiBase` (`""` = KVdb). |
+| `store.js` | `window.KVStore`: PUT/GET/DELETE against KVdb or `apiBase`. |
+| `app.js` | All logic: shortening, server storage, clicks, analytics, charts, QR dialog, export. |
 | `vendor/qrcode.min.js` | Vendored `qrcodejs` 1.0.0 (davidshimjs, MIT) for offline QR generation. |
 | `README.md` | This file. |
 | `LICENSE` | MIT License, © 2026 Mr. Abdul Rahman Dogar. |
 | `.gitignore` | Ignores OS/editor junk and `node_modules/` (there are no dependencies). |
 
-## Run the demo
+## Run it
 
 1. Download or clone this folder.
 2. Open `index.html` in a browser (double-click it, or serve it — see below).
 3. Paste a long URL, click **Shorten URL**, then **Copy** or **Visit & count click**.
-4. Click a short link in the table to record a click and watch the stats and
-   7-day chart update. Use **QR** on any row for its QR code.
+4. Open the short link on any device — it redirects to the original URL and the click count goes up. Reload this page and confirm the server click count is synced into the table.
+
+Note: the KVdb account behind the configured bucket must be email-verified before server writes work; until then, creating a link shows “Could not reach the server — try again.”
 
 Serving it locally (optional, avoids any `file://` quirks in some browsers):
 
@@ -70,64 +71,41 @@ python3 -m http.server 8000
 npx serve .
 ```
 
-## How it works (design notes)
+## How it works (server-backed)
 
-- **Storage:** one `localStorage` array. Each link is
-  `{ id, code, longUrl, shortUrl, createdAt, clicks, lastClickedAt, clickLog[] }`.
+- **Storage:** one server record per short code, `{ v, code, target, createdAt, clicks, lastClickedAt, clickLog[] }`, stored in KVdb under the `us:` prefix (or in a self-hosted backend when `config.js` sets `apiBase`). The app in this browser keeps a local cache of the links it created, under `localStorage` key `shorthub.links.v1`.
   `clickLog` keeps up to 500 timestamps per link; the 7-day chart is computed
   from those timestamps, so it stays correct across reloads.
-- **Short codes:** random 6-character codes, checked for collisions against
-  existing codes; custom aliases are validated and checked for duplicates.
-- **Clicks:** counted on the client when a link is opened from this app.
-  There is no server, so clicks from other people/devices cannot be seen —
-  that is the fundamental limit of a client-side demo, and why a real backend
-  is needed for production (below).
+- **Short codes:** random 6-character codes, checked for collisions against the server (a `GET` first, regenerate if taken); custom aliases are validated and checked for duplicates the same way.
+- **Short links:** the real GitHub Pages URL plus `?r=<code>`, e.g. `https://abdulrahman-dogar-web.github.io/url-shortener/?r=abc123`. On page load with `?r=<code>` (or `#r=<code>`), the app fetches the record from the server, increments the click count there, and redirects with `window.location.replace(target)`. An unknown code shows a clear “link not found” page instead of redirecting.
+- **Clicks:** counted on the server inside the redirect, so clicks from any device are counted. The dashboard re-syncs the server counts into the local cache on load.
 - **QR codes:** `QRCode` from the vendored library renders a table/canvas in
-  the dialog; the PNG download reads that canvas. No QR data leaves the browser.
+  the dialog, encoding the real short link; the PNG download reads that canvas. No QR data leaves the browser.
 
-## Deploying a real backend
+## Switching backends
 
-Design notes only — **no backend is included or faked in this repo.** To turn
-this into a production shortener, keep this front end and add:
-
-1. **Redirect service** — e.g. a Cloudflare Worker, Vercel/Netlify serverless
-   function, or a small Node/Express app. `GET /:code` looks the code up and
-   issues a `301`/`302` redirect to the stored long URL. That is what makes
-   `hub.ly/xxxxxx` work for anyone who clicks it, not just in this browser.
-2. **Database** — Cloudflare KV / D1, Vercel KV / Postgres, Supabase, or
-   DynamoDB. Store `code → longUrl, createdAt, ownerId` plus a clicks table or
-   counter. Add a unique index on `code` so alias collisions are impossible.
-3. **Click tracking** — increment the counter (and append a timestamp, country,
-   referrer, device) inside the redirect handler, before redirecting. Use an
-   atomic increment; do not trust a count sent from the browser.
-4. **API for this front end** — `POST /api/links` (create, with server-side URL
-   validation, alias validation and rate limiting), `GET /api/links` (list the
-   signed-in user's links), `DELETE /api/links/:code`, `GET /api/stats`.
-   Replace the `localStorage` calls in `app.js` with `fetch()` calls to these
-   endpoints; keep `localStorage` only as an offline cache if you want one.
-5. **Real domain + HTTPS** — buy/register a short domain, point its DNS at the
-   Worker/function, and serve everything over HTTPS. The `hub.ly` domain in
-   this demo is a display label only and is not owned or configured here.
-6. **Abuse protection** — auth for creating links (or at least per-IP rate
-   limits), a blocklist for phishing/malware URLs, `rel="nofollow"` on
-   user-submitted links, and expiry for unused codes.
-
-Rough effort: a Cloudflare Worker + KV version is a weekend-sized project;
-a full product with accounts, custom domains and detailed analytics is larger.
+The default backend is KVdb (configured in `config.js`). To use the
+self-hosted backend instead, set `apiBase` in `config.js` to the backend
+origin — the front end then uses `PUT/GET/DELETE {apiBase}/v1/kv/{prefix}{key}`
+with a JSON body, and nothing else changes. KVdb has a rate limit (1000
+requests/hour on the bucket used here); there is no auth on link creation in
+this static front end, so do not use it for anything abuse-sensitive without
+adding rate limiting / a blocklist in front of it.
 
 ## Testing
 
-- `node --check app.js` — syntax check (must exit 0).
+- `node --check app.js` / `node --check store.js` / `node --check config.js` — syntax checks (must exit 0).
 - Open `index.html`, create a link, copy it, click "Visit", and confirm the
   click count, "last clicked", total clicks and the 7-day chart all update,
   then reload the page and confirm the link is still there.
-- Headless logic test (run during the build, not shipped as a dependency):
+- Headless flow test against a local mock KVdb server (mock + test scripts are
+  not shipped — see `TEST-LOG.md` for the exact checks and how they were run):
   the `ShortHub` API exported by `app.js` was exercised in Node with a
   `localStorage` stub — create with auto code and custom alias, validation
-  rejections, 3 clicks on one link + 1 on another, stats (2 links, 4 clicks,
-  4 today, correct top link), 7-day chart totals, search/filter/sort,
-  persistence across a fresh load, CSV export, delete and delete-all, and
-  50 generated codes (all 6 characters, unambiguous alphabet). All 11 checks passed.
+  rejections, collision handling, resolve → redirect target with the click
+  count incrementing on the server, unknown code → null, stats, 7-day chart
+  totals, search/filter/sort, CSV export, delete and delete-all, and
+  50 generated codes (all 6 characters, unambiguous alphabet).
 
 ## Browser support
 

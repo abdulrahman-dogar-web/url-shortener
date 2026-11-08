@@ -1,24 +1,37 @@
 /* ShortHub — URL Shortener & Analytics
- * Fully client-side demo. All links live in localStorage under STORAGE_KEY.
- * No network request is made for shortening, counting or charting.
+ * Server-backed. Links live on the server (KVdb via window.KVStore, or a
+ * self-hosted backend when APP_CONFIG.apiBase is set), so a short link works
+ * on any device: opening https://abdulrahman-dogar-web.github.io/url-shortener/?r=<code>
+ * looks the code up on the server, counts the click there, and redirects.
+ * The list in this app is a LOCAL cache of links created in this browser
+ * (localStorage key STORAGE_KEY); server click counts are synced into it.
  * QR codes are generated locally with the vendored qrcodejs library
  * (vendor/qrcode.min.js); if that library is unavailable, the QR dialog
  * falls back to a labelled api.qrserver.com image (optional, online only).
+ *
+ * © 2026 Mr. Abdul Rahman Dogar
  */
 (function () {
   'use strict';
 
+  var FALLBACK_CONFIG = { bucket: "R3J1t5fYRx6t5bcaSorAfj", prefix: "us:", apiBase: "" };
+  var hasWindow = typeof window !== 'undefined';
+  if (hasWindow && window.KVStore && window.KVStore.configure) {
+    window.KVStore.configure(window.APP_CONFIG || FALLBACK_CONFIG);
+  }
+
   var STORAGE_KEY = 'shorthub.links.v1';
-  var SHORT_DOMAIN = 'hub.ly';
+  var PAGES_BASE = 'https://abdulrahman-dogar-web.github.io/url-shortener/';
   var CODE_LENGTH = 6;
   var CODE_CHARS = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/l/I
   var ALIAS_RE = /^[A-Za-z0-9_-]{3,30}$/;
   var MAX_CLICK_LOG = 500;
 
   var hasDocument = typeof document !== 'undefined';
-  var hasWindow = typeof window !== 'undefined';
   var hasLocalStorage = false;
   try { hasLocalStorage = typeof localStorage !== 'undefined' && !!localStorage.getItem; } catch (e) { hasLocalStorage = false; }
+
+  function kv() { return (hasWindow && window.KVStore) ? window.KVStore : null; }
 
   /* ---------------- pure helpers (also exposed for testing) ---------------- */
 
@@ -53,7 +66,8 @@
 
   function isValidAlias(alias) { return ALIAS_RE.test(alias); }
 
-  function shortDisplay(code) { return SHORT_DOMAIN + '/' + code; }
+  // The real short link: the GitHub Pages URL plus ?r=<code>.
+  function shortDisplay(code) { return PAGES_BASE + '?r=' + code; }
 
   function escapeHtml(value) {
     return String(value == null ? '' : value)
@@ -86,7 +100,7 @@
   function startOfDay(d) { var c = new Date(d); c.setHours(0, 0, 0, 0); return c; }
   function sameDay(a, b) { return startOfDay(a).getTime() === startOfDay(b).getTime(); }
 
-  /* ---------------- storage ---------------- */
+  /* ---------------- local cache (links created in this browser) ---------------- */
 
   var memoryFallback = [];
   function loadLinks() {
@@ -104,7 +118,31 @@
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(links)); } catch (e) { /* storage full/blocked: keep in-memory copy */ memoryFallback = links.slice(); }
   }
 
-  /* ---------------- core actions (pure-ish, DOM-free) ---------------- */
+  function upsertCache(link) {
+    var links = loadLinks();
+    var found = false;
+    for (var i = 0; i < links.length; i++) {
+      if (links[i].code === link.code) { links[i] = link; found = true; break; }
+    }
+    if (!found) links.unshift(link);
+    saveLinks(links);
+    return links;
+  }
+
+  function serverToCache(rec) {
+    return {
+      id: 'l_' + rec.code,
+      code: rec.code,
+      longUrl: rec.target,
+      shortUrl: shortDisplay(rec.code),
+      createdAt: rec.createdAt,
+      clicks: rec.clicks || 0,
+      lastClickedAt: rec.lastClickedAt || null,
+      clickLog: rec.clickLog || []
+    };
+  }
+
+  /* ---------------- server actions (async, DOM-free) ---------------- */
 
   function findByCode(links, code) {
     var lower = String(code).toLowerCase();
@@ -112,60 +150,135 @@
     return null;
   }
 
-  // Returns { ok, link } or { ok:false, error } — never throws for bad input.
+  // Creates a short link on the SERVER. Returns a Promise of
+  // { ok, link } or { ok:false, error } — never throws for bad input or a
+  // server failure. Random codes are checked against the server first and
+  // regenerated on collision; a taken alias is rejected.
   function createLink(longUrlRaw, aliasRaw) {
     var longUrl = normalizeUrl(longUrlRaw);
-    if (!isValidUrl(longUrlRaw)) return { ok: false, error: 'Enter a valid URL, for example https://example.com/page' };
+    if (!isValidUrl(longUrlRaw)) return Promise.resolve({ ok: false, error: 'Enter a valid URL, for example https://example.com/page' });
     var alias = String(aliasRaw || '').trim();
-    if (alias && !isValidAlias(alias)) return { ok: false, error: 'Custom alias must be 3–30 characters: letters, numbers, - or _ only.' };
+    if (alias && !isValidAlias(alias)) return Promise.resolve({ ok: false, error: 'Custom alias must be 3–30 characters: letters, numbers, - or _ only.' });
+    var store = kv();
+    if (!store) return Promise.resolve({ ok: false, error: 'Server store is not available in this context.' });
 
-    var links = loadLinks();
-    if (alias && findByCode(links, alias)) return { ok: false, error: 'That alias is already taken. Try a different one.' };
+    function tryCode(code, attemptsLeft) {
+      return store.get(code).then(function (existing) {
+        if (existing) {
+          if (alias) return { ok: false, error: 'That alias is already taken. Try a different one.' };
+          if (attemptsLeft <= 0) return { ok: false, error: 'Could not generate a unique code. Please try again.' };
+          return tryCode(generateCode(), attemptsLeft - 1);
+        }
+        var now = new Date().toISOString();
+        var rec = {
+          v: 1, code: code, target: longUrl, createdAt: now,
+          clicks: 0, lastClickedAt: null, clickLog: []
+        };
+        return store.put(code, rec).then(function (saved) {
+          if (!saved) return { ok: false, error: 'Could not reach the server — try again.' };
+          var link = serverToCache(rec);
+          link.id = 'l_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+          upsertCache(link);
+          return { ok: true, link: link };
+        });
+      });
+    }
 
-    var code = alias || generateCode();
-    var guard = 0;
-    while (!alias && findByCode(links, code) && guard < 50) { code = generateCode(); guard++; }
-    if (findByCode(links, code)) return { ok: false, error: 'Could not generate a unique code. Please try again.' };
-
-    var now = new Date().toISOString();
-    var link = {
-      id: 'l_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8),
-      code: code,
-      longUrl: longUrl,
-      shortUrl: shortDisplay(code),
-      createdAt: now,
-      clicks: 0,
-      lastClickedAt: null,
-      clickLog: []
-    };
-    links.unshift(link);
-    saveLinks(links);
-    return { ok: true, link: link };
+    return tryCode(alias || generateCode(), 50).catch(function () {
+      return { ok: false, error: 'Could not reach the server — try again.' };
+    });
   }
 
+  // Resolves a short code on the server: returns a Promise of the server
+  // record ({ target, clicks, ... }) with clicks incremented, or null when
+  // the code does not exist. This is what ?r=<code> page loads call.
+  function resolveCode(code) {
+    var store = kv();
+    if (!store) return Promise.resolve(null);
+    return store.get(code).then(function (rec) {
+      if (!rec || typeof rec.target !== 'string') return null;
+      var now = new Date().toISOString();
+      rec.clicks = (rec.clicks || 0) + 1;
+      rec.lastClickedAt = now;
+      rec.clickLog = rec.clickLog || [];
+      rec.clickLog.push(now);
+      if (rec.clickLog.length > MAX_CLICK_LOG) rec.clickLog = rec.clickLog.slice(-MAX_CLICK_LOG);
+      return store.put(code, rec).then(function () {
+        var cached = findByCode(loadLinks(), code);
+        if (cached) {
+          var updated = serverToCache(rec);
+          updated.id = cached.id;
+          upsertCache(updated);
+        }
+        return rec;
+      });
+    }).catch(function () { return null; });
+  }
+
+  // Counts a click for a link in the local list, on the server. Returns a
+  // Promise of the updated cached link, or null.
   function recordClick(id) {
     var links = loadLinks();
-    for (var i = 0; i < links.length; i++) {
-      if (links[i].id === id) {
-        links[i].clicks += 1;
-        links[i].lastClickedAt = new Date().toISOString();
-        links[i].clickLog = links[i].clickLog || [];
-        links[i].clickLog.push(links[i].lastClickedAt);
-        if (links[i].clickLog.length > MAX_CLICK_LOG) links[i].clickLog = links[i].clickLog.slice(-MAX_CLICK_LOG);
-        saveLinks(links);
-        return links[i];
-      }
-    }
-    return null;
+    var cached = null;
+    for (var i = 0; i < links.length; i++) if (links[i].id === id) { cached = links[i]; break; }
+    if (!cached) return Promise.resolve(null);
+    var store = kv();
+    if (!store) return Promise.resolve(cached);
+    return store.get(cached.code).then(function (rec) {
+      if (!rec) return cached; // server record gone — keep the local count only
+      var now = new Date().toISOString();
+      rec.clicks = (rec.clicks || 0) + 1;
+      rec.lastClickedAt = now;
+      rec.clickLog = rec.clickLog || [];
+      rec.clickLog.push(now);
+      if (rec.clickLog.length > MAX_CLICK_LOG) rec.clickLog = rec.clickLog.slice(-MAX_CLICK_LOG);
+      return store.put(cached.code, rec).then(function () {
+        var updated = serverToCache(rec);
+        updated.id = cached.id;
+        upsertCache(updated);
+        return updated;
+      });
+    }).catch(function () { return cached; });
   }
 
   function deleteLink(id) {
-    var links = loadLinks().filter(function (l) { return l.id !== id; });
-    saveLinks(links);
-    return links;
+    var links = loadLinks();
+    var target = null;
+    links.forEach(function (l) { if (l.id === id) target = l; });
+    var remaining = links.filter(function (l) { return l.id !== id; });
+    saveLinks(remaining);
+    var store = kv();
+    if (!target || !store) return Promise.resolve(remaining);
+    return store.del(target.code).then(function () { return remaining; })
+      .catch(function () { return remaining; });
   }
 
-  function deleteAllLinks() { saveLinks([]); return []; }
+  function deleteAllLinks() {
+    var links = loadLinks();
+    saveLinks([]);
+    var store = kv();
+    if (!store) return Promise.resolve([]);
+    return Promise.all(links.map(function (l) { return store.del(l.code).catch(function () { return false; }); }))
+      .then(function () { return []; });
+  }
+
+  // Pulls the server click counts for every cached link into the local list.
+  function refreshCounts() {
+    var store = kv();
+    if (!store) return Promise.resolve(loadLinks());
+    var links = loadLinks();
+    return Promise.all(links.map(function (cached) {
+      return store.get(cached.code).then(function (rec) {
+        if (!rec) return cached; // gone from the server — keep the cached row
+        var updated = serverToCache(rec);
+        updated.id = cached.id;
+        return updated;
+      }).catch(function () { return cached; });
+    })).then(function (updated) {
+      saveLinks(updated);
+      return updated;
+    });
+  }
 
   function getStats(links) {
     var totalClicks = 0, todayClicks = 0, top = null;
@@ -283,7 +396,7 @@
     set('stat-total-links', String(s.totalLinks));
     set('stat-total-clicks', String(s.totalClicks));
     set('stat-clicks-today', String(s.clicksToday));
-    set('stat-links-sub', s.totalLinks === 0 ? 'No links yet' : (s.totalLinks === 1 ? '1 link stored locally' : s.totalLinks + ' links stored locally'));
+    set('stat-links-sub', s.totalLinks === 0 ? 'No links yet' : (s.totalLinks === 1 ? '1 link in your list' : s.totalLinks + ' links in your list'));
     set('stat-clicks-sub', s.totalLinks === 0 ? 'No clicks yet' : ('Avg ' + s.avgClicks.toFixed(1) + ' per link'));
     set('stat-top-link', s.topLink ? s.topLink.shortUrl : '—');
     set('stat-top-sub', s.topLink ? (s.topLink.clicks + ' click' + (s.topLink.clicks === 1 ? '' : 's')) : 'No clicks yet');
@@ -335,8 +448,8 @@
 
     body.innerHTML = rows.map(function (l) {
       return '<tr>' +
-        '<td class="short-cell"><a href="' + escapeHtml(l.longUrl) + '" target="_blank" rel="noopener" data-visit="' + escapeHtml(l.id) + '" title="Open original URL and count a click">' + escapeHtml(l.shortUrl) + '</a></td>' +
-        '<td class="long-cell"><a href="' + escapeHtml(l.longUrl) + '" target="_blank" rel="noopener" data-visit="' + escapeHtml(l.id) + '" title="' + escapeHtml(l.longUrl) + '">' + escapeHtml(l.longUrl) + '</a></td>' +
+        '<td class="short-cell"><a href="' + escapeHtml(l.shortUrl) + '" target="_blank" rel="noopener" title="Open the short link (redirects to the original URL)">' + escapeHtml(l.shortUrl) + '</a></td>' +
+        '<td class="long-cell"><a href="' + escapeHtml(l.longUrl) + '" target="_blank" rel="noopener" title="' + escapeHtml(l.longUrl) + '">' + escapeHtml(l.longUrl) + '</a></td>' +
         '<td><span class="click-badge">' + (l.clicks || 0) + '</span></td>' +
         '<td class="muted-cell" title="' + escapeHtml(formatDate(l.createdAt)) + '">' + escapeHtml(timeAgo(l.createdAt)) + '</td>' +
         '<td class="muted-cell">' + (l.lastClickedAt ? escapeHtml(timeAgo(l.lastClickedAt)) : 'Never') + '</td>' +
@@ -359,8 +472,8 @@
     box.innerHTML = '';
     if (typeof QRCode !== 'undefined') {
       try {
-        new QRCode(box, { text: link.longUrl, width: 180, height: 180, correctLevel: QRCode.CorrectLevel.M });
-        if (note) note.textContent = 'Scan with your phone camera to open the original URL. Generated locally in your browser.';
+        new QRCode(box, { text: link.shortUrl, width: 180, height: 180, correctLevel: QRCode.CorrectLevel.M });
+        if (note) note.textContent = 'Scan with your phone camera to open the short link. Generated locally in your browser.';
       } catch (e) { fallbackQR(box, link, note); }
     } else {
       fallbackQR(box, link, note);
@@ -372,7 +485,7 @@
     // Optional online fallback only — the vendored library is the primary path.
     var img = document.createElement('img');
     img.alt = 'QR code for ' + link.shortUrl;
-    img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=' + encodeURIComponent(link.longUrl);
+    img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=' + encodeURIComponent(link.shortUrl);
     box.appendChild(img);
     if (note) note.textContent = 'Local QR library unavailable — QR image loaded from the public api.qrserver.com service (needs internet).';
   }
@@ -416,9 +529,66 @@
       demoLink('blog42', 'https://example.com/blog/how-to-shorten-links', 4, [0, 1, 2]),
       demoLink('summer', 'https://example.com/summer-sale-2026', 2, [0])
     ];
-    saveLinks(demo.concat(loadLinks()));
-    renderAll();
-    toast('Demo data loaded — 3 links, 11 clicks', 'success');
+    // Demo links are real server links too, so their short URLs resolve.
+    var store = kv();
+    var save = store
+      ? Promise.all(demo.map(function (l) {
+          return store.put(l.code, {
+            v: 1, code: l.code, target: l.longUrl, createdAt: l.createdAt,
+            clicks: l.clicks, lastClickedAt: l.lastClickedAt, clickLog: l.clickLog
+          }).catch(function () { return false; });
+        }))
+      : Promise.resolve([]);
+    save.then(function (results) {
+      var failed = results.filter(function (ok) { return !ok; }).length;
+      demo.forEach(function (l) { upsertCache(l); });
+      renderAll();
+      if (failed) toast('Demo data loaded locally, but ' + failed + ' link(s) could not be saved to the server — those short links may not resolve.', 'error');
+      else toast('Demo data loaded — 3 links, 11 clicks', 'success');
+    });
+  }
+
+  /* ---------------- redirect handling (?r=<code> / #r=<code>) ---------------- */
+
+  function redirectCodeFromLocation() {
+    try {
+      var q = new URLSearchParams(window.location.search).get('r');
+      if (q) return q;
+      var h = (window.location.hash || '').slice(1);
+      if (h) {
+        var p = new URLSearchParams(h);
+        if (p.get('r')) return p.get('r');
+      }
+    } catch (e) { /* malformed URL — treat as no redirect */ }
+    return null;
+  }
+
+  function handleRedirect(code) {
+    var view = $('redirect-view');
+    var loading = $('redirect-loading');
+    var notFound = $('redirect-notfound');
+    var notFoundCode = $('redirect-notfound-code');
+    // Hide the creator/dashboard; this page load is a redirect, not the app.
+    var main = document.querySelector('main');
+    if (main) {
+      var sections = main.querySelectorAll(':scope > section, :scope > p');
+      for (var i = 0; i < sections.length; i++) {
+        if (sections[i].id !== 'redirect-view') sections[i].hidden = true;
+      }
+    }
+    if (view) show(view, true);
+    if (loading) show(loading, true);
+    if (notFound) show(notFound, false);
+    resolveCode(code).then(function (rec) {
+      if (rec && rec.target) {
+        window.location.replace(rec.target);
+        return;
+      }
+      if (loading) show(loading, false);
+      if (notFound) show(notFound, true);
+      if (notFoundCode) notFoundCode.textContent = code;
+      document.title = 'ShortHub — Link not found';
+    });
   }
 
   /* ---------------- wiring ---------------- */
@@ -428,7 +598,7 @@
     var result = $('result');
     if (!result) return;
     var shortEl = $('result-short');
-    if (shortEl) { shortEl.textContent = link.shortUrl; shortEl.href = link.longUrl; shortEl.setAttribute('data-visit', link.id); }
+    if (shortEl) { shortEl.textContent = link.shortUrl; shortEl.href = link.shortUrl; }
     var longEl = $('result-long'); if (longEl) longEl.textContent = link.longUrl;
     show(result, true);
     result.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -436,21 +606,30 @@
 
   function init() {
     if (!hasDocument) return;
+
+    // A short-link visit: resolve on the server, count the click, redirect.
+    var code = redirectCodeFromLocation();
+    if (code) { handleRedirect(code); return; }
+
     var form = $('shorten-form');
     on(form, 'submit', function (e) {
       e.preventDefault();
       var urlEl = $('long-url'), aliasEl = $('custom-alias'), errEl = $('form-error');
-      var res = createLink(urlEl ? urlEl.value : '', aliasEl ? aliasEl.value : '');
-      if (!res.ok) {
-        if (errEl) { errEl.textContent = res.error; show(errEl, true); }
-        toast(res.error, 'error');
-        return;
-      }
-      if (errEl) show(errEl, false);
-      showResult(res.link);
-      renderAll();
-      toast('Short link created: ' + res.link.shortUrl, 'success');
-      if (aliasEl) aliasEl.value = '';
+      var btn = form.querySelector('button[type="submit"]');
+      if (btn) btn.disabled = true;
+      createLink(urlEl ? urlEl.value : '', aliasEl ? aliasEl.value : '').then(function (res) {
+        if (btn) btn.disabled = false;
+        if (!res.ok) {
+          if (errEl) { errEl.textContent = res.error; show(errEl, true); }
+          toast(res.error, 'error');
+          return;
+        }
+        if (errEl) show(errEl, false);
+        showResult(res.link);
+        renderAll();
+        toast('Short link created: ' + res.link.shortUrl, 'success');
+        if (aliasEl) aliasEl.value = '';
+      });
     });
 
     on($('clear-form'), 'click', function () {
@@ -467,9 +646,8 @@
     on($('result-qr'), 'click', function () { if (currentResult) openQR(currentResult); });
     on($('result-visit'), 'click', function () {
       if (!currentResult) return;
-      recordClick(currentResult.id);
-      renderAll();
-      window.open(currentResult.longUrl, '_blank', 'noopener');
+      // Open the real short link — the redirect counts the click on the server.
+      window.open(currentResult.shortUrl, '_blank', 'noopener');
     });
 
     ['search', 'sort', 'filter'].forEach(function (id) {
@@ -488,10 +666,11 @@
     on($('clear-all'), 'click', function () {
       if (!loadLinks().length) { toast('No links to delete'); return; }
       if (window.confirm('Delete ALL links? This cannot be undone.')) {
-        deleteAllLinks();
-        show($('result'), false);
-        renderAll();
-        toast('All links deleted', 'success');
+        deleteAllLinks().then(function () {
+          show($('result'), false);
+          renderAll();
+          toast('All links deleted', 'success');
+        });
       }
     });
 
@@ -511,22 +690,14 @@
         var l2 = loadLinks().find(function (x) { return x.id === qrId; });
         if (l2) openQR(l2);
       } else if (visitId) {
-        var updated = recordClick(visitId);
-        renderAll();
-        if (updated) window.open(updated.longUrl, '_blank', 'noopener');
+        // Open the real short link — the redirect counts the click on the server.
+        var l3 = loadLinks().find(function (x) { return x.id === visitId; });
+        if (l3) window.open(l3.shortUrl, '_blank', 'noopener');
       } else if (delId) {
-        deleteLink(delId);
-        renderAll();
-        toast('Link deleted', 'success');
-      }
-    });
-
-    // Clicking a short/original link in the table counts a click, then follows the href.
-    on(body, 'click', function (e) {
-      var t = e.target;
-      if (t && t.getAttribute && t.getAttribute('data-visit')) {
-        recordClick(t.getAttribute('data-visit'));
-        renderAll();
+        deleteLink(delId).then(function () {
+          renderAll();
+          toast('Link deleted', 'success');
+        });
       }
     });
 
@@ -537,15 +708,22 @@
     on(document, 'keydown', function (e) { if (e.key === 'Escape') closeQR(); });
 
     renderAll();
+    // Sync the server click counts into the local list (clicks from other
+    // devices show up here after this refresh).
+    refreshCounts().then(function () { renderAll(); });
   }
 
   // Public API — used by the result box, and exposed for automated testing.
+  // createLink / recordClick / deleteLink / deleteAllLinks / resolveCode are
+  // async now (they talk to the server); the rest are synchronous.
   var api = {
-    createLink: createLink, recordClick: recordClick, deleteLink: deleteLink,
-    deleteAllLinks: deleteAllLinks, loadLinks: loadLinks, getStats: getStats,
+    createLink: createLink, resolveCode: resolveCode, recordClick: recordClick,
+    deleteLink: deleteLink, deleteAllLinks: deleteAllLinks,
+    refreshCounts: refreshCounts, loadLinks: loadLinks, getStats: getStats,
     getLast7Days: getLast7Days, filteredLinks: filteredLinks, toCSV: toCSV,
     generateCode: generateCode, normalizeUrl: normalizeUrl, isValidUrl: isValidUrl,
-    isValidAlias: isValidAlias, shortDisplay: shortDisplay, STORAGE_KEY: STORAGE_KEY
+    isValidAlias: isValidAlias, shortDisplay: shortDisplay,
+    PAGES_BASE: PAGES_BASE, STORAGE_KEY: STORAGE_KEY
   };
   if (hasWindow) window.ShortHub = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

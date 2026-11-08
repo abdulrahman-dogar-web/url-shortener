@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ShortHub — URL Shortener &amp; Analytics</title>
-<meta name="description" content="ShortHub is a fast, fully client-side URL shortener with click analytics, QR codes and a 7-day chart. Links are stored in your browser with localStorage.">
+<meta name="description" content="ShortHub is a fast, server-backed URL shortener with click analytics and QR codes. Short links work on any device.">
 <link rel="stylesheet" href="styles.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%236366f1'/%3E%3Ctext x='50' y='68' font-size='52' text-anchor='middle' fill='white' font-family='Arial' font-weight='bold'%3ES%3C/text%3E%3C/svg%3E">
 </head>
@@ -20,16 +20,29 @@
       <a href="#analytics">Analytics</a>
       <a href="#links">My Links</a>
     </nav>
-    <span class="pill pill-demo" title="Short links are stored only in this browser">Local demo &middot; no account</span>
+    <span class="pill pill-demo" title="Short links are stored on the server and work on any device">Server-backed &middot; no account</span>
   </div>
 </header>
 
 <main class="wrap">
+  <!-- Shown only when this page load is a short-link redirect (?r=<code>) -->
+  <section id="redirect-view" class="card" hidden aria-live="polite">
+    <div id="redirect-loading">
+      <h2>Redirecting…</h2>
+      <p>Looking up your short link on the server.</p>
+    </div>
+    <div id="redirect-notfound" hidden>
+      <h2>Link not found</h2>
+      <p>There is no short link with the code <code id="redirect-notfound-code"></code>. It may have been deleted, or the code was typed incorrectly. Check the link and try again.</p>
+      <p><a class="btn btn-primary" href="index.html">Create your own short link</a></p>
+    </div>
+  </section>
+
   <section class="hero">
     <p class="eyebrow">URL shortener &middot; click analytics &middot; QR codes</p>
     <h1>Shorten a link.<br><span>See every click.</span></h1>
-    <p class="lede">Paste a long URL, get a short <code>hub.ly/xxxxxx</code> link, share it, and watch clicks, last-clicked time and a 7-day chart update live. Everything is stored in your browser — nothing is uploaded anywhere.</p>
-    <p class="demo-note"><strong>Honest label:</strong> this is a fully client-side demo. Short links only work inside this app (clicking one opens the original URL and counts the click here). See the README for how to deploy a real backend.</p>
+    <p class="lede">Paste a long URL, get a short link (<code>abdulrahman-dogar-web.github.io/url-shortener/?r=xxxxxx</code>), share it, and watch clicks, last-clicked time and a 7-day chart update live. Links are saved on the server, so they work on any device.</p>
+    <p class="demo-note"><strong>Server-backed:</strong> short links are stored on the server and redirect from any device. “My links” below is a cache of the links you created in this browser — clicks from anywhere are counted on the server and synced into it.</p>
   </section>
 
   <!-- CREATE -->
@@ -43,7 +56,7 @@
       <label class="field">
         <span>Custom alias <span class="optional">(optional, 3–30 letters, numbers, - or _)</span></span>
         <div class="alias-row">
-          <span class="alias-prefix" aria-hidden="true">hub.ly/</span>
+          <span class="alias-prefix" aria-hidden="true">…/url-shortener/?r=</span>
           <input id="custom-alias" type="text" placeholder="my-link" autocomplete="off" maxlength="30" spellcheck="false">
         </div>
       </label>
@@ -58,10 +71,10 @@
     <div class="result" id="result" hidden>
       <div class="result-head">
         <strong>Your short link is ready</strong>
-        <span class="pill pill-demo">Local demo link</span>
+        <span class="pill pill-demo">Saved to server ✓</span>
       </div>
       <div class="result-link-row">
-        <a id="result-short" class="result-short" href="#" target="_blank" rel="noopener">hub.ly/------</a>
+        <a id="result-short" class="result-short" href="#" target="_blank" rel="noopener">…/url-shortener/?r=------</a>
         <button class="btn btn-primary btn-sm" type="button" id="result-copy">Copy</button>
         <button class="btn btn-ghost btn-sm" type="button" id="result-qr">QR code</button>
         <button class="btn btn-ghost btn-sm" type="button" id="result-visit">Visit &amp; count click</button>
@@ -146,13 +159,13 @@
     <p class="empty-note" id="no-results" hidden>No links match your search or filter.</p>
   </section>
 
-  <p class="fineprint">Short links are stored only in this browser (<code>localStorage</code> key <code>shorthub.links.v1</code>). Clearing browser data deletes them. QR codes are generated locally with the vendored <code>qrcodejs</code> library — no QR image is uploaded anywhere.</p>
+  <p class="fineprint">Short links are stored on the server; “My links” is a cache of the links you created in this browser (<code>localStorage</code> key <code>shorthub.links.v1</code>). Clearing browser data clears the cache, not the links — a link created here can be deleted from the table. QR codes are generated locally with the vendored <code>qrcodejs</code> library — no QR image is uploaded anywhere.</p>
 </main>
 
 <footer class="footer">
   <div class="wrap">
-    <p><strong>ShortHub</strong> — a fully client-side URL shortener demo. MIT License &copy; 2026 Mr. Abdul Rahman Dogar.</p>
-    <p><a href="README.md">README — how to deploy a real backend</a></p>
+    <p><strong>ShortHub</strong> — a server-backed URL shortener. MIT License &copy; 2026 Mr. Abdul Rahman Dogar.</p>
+    <p><a href="README.md">README — how it works</a></p>
   </div>
 </footer>
 
@@ -163,7 +176,7 @@
       <h3 id="qr-title">QR code</h3>
       <button class="btn btn-ghost btn-sm" type="button" id="qr-close" aria-label="Close QR code dialog">&times;</button>
     </div>
-    <p class="qr-short" id="qr-short-label">hub.ly/------</p>
+    <p class="qr-short" id="qr-short-label">…/url-shortener/?r=------</p>
     <div class="qr-box" id="qr-box"></div>
     <p class="qr-note" id="qr-note">Scan with your phone camera to open the original URL. Generated locally in your browser.</p>
     <div class="modal-actions">
@@ -176,6 +189,8 @@
 <div class="toast-wrap" id="toast-wrap" aria-live="polite"></div>
 
 <script src="vendor/qrcode.min.js"></script>
+<script src="config.js"></script>
+<script src="store.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
