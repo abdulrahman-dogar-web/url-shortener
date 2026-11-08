@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ShortHub — URL Shortener &amp; Analytics</title>
+<meta name="description" content="ShortHub is a fast, fully client-side URL shortener with click analytics, QR codes and a 7-day chart. Links are stored in your browser with localStorage.">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%236366f1'/%3E%3Ctext x='50' y='68' font-size='52' text-anchor='middle' fill='white' font-family='Arial' font-weight='bold'%3ES%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="index.html" aria-label="ShortHub home">
+      <span class="brand-mark" aria-hidden="true">⌁</span>
+      <span class="brand-text">Short<span>Hub</span></span>
+    </a>
+    <nav class="topnav" aria-label="Main navigation">
+      <a href="#create">Create</a>
+      <a href="#analytics">Analytics</a>
+      <a href="#links">My Links</a>
+    </nav>
+    <span class="pill pill-demo" title="Short links are stored only in this browser">Local demo &middot; no account</span>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <p class="eyebrow">URL shortener &middot; click analytics &middot; QR codes</p>
+    <h1>Shorten a link.<br><span>See every click.</span></h1>
+    <p class="lede">Paste a long URL, get a short <code>hub.ly/xxxxxx</code> link, share it, and watch clicks, last-clicked time and a 7-day chart update live. Everything is stored in your browser — nothing is uploaded anywhere.</p>
+    <p class="demo-note"><strong>Honest label:</strong> this is a fully client-side demo. Short links only work inside this app (clicking one opens the original URL and counts the click here). See the README for how to deploy a real backend.</p>
+  </section>
+
+  <!-- CREATE -->
+  <section id="create" class="card create-card" aria-labelledby="create-heading">
+    <h2 id="create-heading">Create a short link</h2>
+    <form id="shorten-form" novalidate>
+      <label class="field">
+        <span>Long URL <span class="required" aria-hidden="true">*</span></span>
+        <input id="long-url" type="url" inputmode="url" placeholder="https://example.com/a/very/long/page?with=parameters" autocomplete="off" required>
+      </label>
+      <label class="field">
+        <span>Custom alias <span class="optional">(optional, 3–30 letters, numbers, - or _)</span></span>
+        <div class="alias-row">
+          <span class="alias-prefix" aria-hidden="true">hub.ly/</span>
+          <input id="custom-alias" type="text" placeholder="my-link" autocomplete="off" maxlength="30" spellcheck="false">
+        </div>
+      </label>
+      <p class="form-error" id="form-error" role="alert" hidden></p>
+      <div class="form-actions">
+        <button class="btn btn-primary" type="submit">Shorten URL &rarr;</button>
+        <button class="btn btn-ghost" type="button" id="load-demo">Load demo data</button>
+        <button class="btn btn-ghost" type="button" id="clear-form">Clear</button>
+      </div>
+    </form>
+
+    <div class="result" id="result" hidden>
+      <div class="result-head">
+        <strong>Your short link is ready</strong>
+        <span class="pill pill-demo">Local demo link</span>
+      </div>
+      <div class="result-link-row">
+        <a id="result-short" class="result-short" href="#" target="_blank" rel="noopener">hub.ly/------</a>
+        <button class="btn btn-primary btn-sm" type="button" id="result-copy">Copy</button>
+        <button class="btn btn-ghost btn-sm" type="button" id="result-qr">QR code</button>
+        <button class="btn btn-ghost btn-sm" type="button" id="result-visit">Visit &amp; count click</button>
+      </div>
+      <p class="result-long"><span>Points to:</span> <span id="result-long"></span></p>
+    </div>
+  </section>
+
+  <!-- ANALYTICS -->
+  <section id="analytics" aria-labelledby="analytics-heading">
+    <h2 id="analytics-heading" class="section-title">Analytics</h2>
+    <div class="stats" role="region" aria-label="Link statistics">
+      <article class="stat"><span class="stat-label">Total links</span><strong class="stat-value" id="stat-total-links">0</strong><span class="stat-sub" id="stat-links-sub">No links yet</span></article>
+      <article class="stat"><span class="stat-label">Total clicks</span><strong class="stat-value" id="stat-total-clicks">0</strong><span class="stat-sub" id="stat-clicks-sub">No clicks yet</span></article>
+      <article class="stat"><span class="stat-label">Clicks today</span><strong class="stat-value" id="stat-clicks-today">0</strong><span class="stat-sub">Last 24 hours</span></article>
+      <article class="stat"><span class="stat-label">Top link</span><strong class="stat-value stat-value-sm" id="stat-top-link">—</strong><span class="stat-sub" id="stat-top-sub">No clicks yet</span></article>
+    </div>
+
+    <div class="charts">
+      <article class="card chart-card">
+        <h3>Clicks — last 7 days</h3>
+        <p class="card-sub">Each bar is one day. Hover a bar for the exact count.</p>
+        <div class="bar-chart" id="week-chart" role="img" aria-label="Bar chart of clicks in the last 7 days"></div>
+        <p class="empty-note" id="week-empty">No clicks in the last 7 days yet. Click “Visit” on a link to record one.</p>
+      </article>
+      <article class="card chart-card">
+        <h3>Top links by clicks</h3>
+        <p class="card-sub">Your five most-clicked links.</p>
+        <div class="top-list" id="top-list"></div>
+        <p class="empty-note" id="top-empty">No clicks yet — your top links will appear here.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- LINKS TABLE -->
+  <section id="links" class="card" aria-labelledby="links-heading">
+    <div class="table-head">
+      <h2 id="links-heading">My links <span class="count-badge" id="links-count">0</span></h2>
+      <div class="table-tools">
+        <input id="search" type="search" placeholder="Search code or URL…" aria-label="Search links" autocomplete="off">
+        <select id="sort" aria-label="Sort links">
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="most-clicked">Most clicked</option>
+          <option value="least-clicked">Least clicked</option>
+        </select>
+        <select id="filter" aria-label="Filter links">
+          <option value="all">All links</option>
+          <option value="clicked">Clicked</option>
+          <option value="never">Never clicked</option>
+          <option value="today">Created today</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="table-actions">
+      <button class="btn btn-ghost btn-sm" type="button" id="export-json">Export JSON</button>
+      <button class="btn btn-ghost btn-sm" type="button" id="export-csv">Export CSV</button>
+      <button class="btn btn-danger btn-sm" type="button" id="clear-all">Delete all links</button>
+    </div>
+
+    <div class="table-scroll">
+      <table id="links-table">
+        <thead>
+          <tr>
+            <th scope="col">Short link</th>
+            <th scope="col">Original URL</th>
+            <th scope="col">Clicks</th>
+            <th scope="col">Created</th>
+            <th scope="col">Last clicked</th>
+            <th scope="col"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody id="links-body"></tbody>
+      </table>
+    </div>
+    <div class="empty-state" id="empty-state">
+      <p class="empty-icon" aria-hidden="true">🔗</p>
+      <p><strong>No links yet.</strong></p>
+      <p>Create your first short link above, or load the demo data to explore the analytics.</p>
+    </div>
+    <p class="empty-note" id="no-results" hidden>No links match your search or filter.</p>
+  </section>
+
+  <p class="fineprint">Short links are stored only in this browser (<code>localStorage</code> key <code>shorthub.links.v1</code>). Clearing browser data deletes them. QR codes are generated locally with the vendored <code>qrcodejs</code> library — no QR image is uploaded anywhere.</p>
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <p><strong>ShortHub</strong> — a fully client-side URL shortener demo. MIT License &copy; 2026 Mr. Abdul Rahman Dogar.</p>
+    <p><a href="README.md">README — how to deploy a real backend</a></p>
+  </div>
+</footer>
+
+<!-- QR MODAL -->
+<div class="modal-backdrop" id="qr-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="qr-title">
+    <div class="modal-head">
+      <h3 id="qr-title">QR code</h3>
+      <button class="btn btn-ghost btn-sm" type="button" id="qr-close" aria-label="Close QR code dialog">&times;</button>
+    </div>
+    <p class="qr-short" id="qr-short-label">hub.ly/------</p>
+    <div class="qr-box" id="qr-box"></div>
+    <p class="qr-note" id="qr-note">Scan with your phone camera to open the original URL. Generated locally in your browser.</p>
+    <div class="modal-actions">
+      <button class="btn btn-primary btn-sm" type="button" id="qr-download">Download PNG</button>
+      <button class="btn btn-ghost btn-sm" type="button" id="qr-copy">Copy short link</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toast-wrap" aria-live="polite"></div>
+
+<script src="vendor/qrcode.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
